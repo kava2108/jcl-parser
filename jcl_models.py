@@ -9,8 +9,10 @@ ParamValue = Union[str, List[Any], Dict[str, Any]]
 
 class DDStatement(BaseModel):
     type: Literal["DD"] = "DD"
-    name: str
+    name: Optional[str] = None
     params: Dict[str, ParamValue]
+    concatenated: bool = False
+    instream: Optional[List[str]] = None
 
 
 class ExecStep(BaseModel):

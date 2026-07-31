@@ -3,7 +3,9 @@ import re
 import sys
 from typing import Dict, List, Optional, Union
 
-LINE_RE = re.compile(r"^//(\S+)\s+(JOB|EXEC|DD)\b(.*)$")
+LINE_RE = re.compile(r"^//(\S+)\s+(JOB|EXEC|DD|PROC|PEND)\b(.*)$")
+ANON_RE = re.compile(r"^//\s+(DD|SET|PEND)\b(.*)$")
+CONT_RE = re.compile(r"^//\s+(\S.*)$")
 
 ParamValue = Union[str, List, Dict]
 
@@ -65,32 +67,127 @@ def parse_params(text: str) -> Dict[str, ParamValue]:
     params: Dict[str, ParamValue] = {}
     for token in split_params(text):
         if "=" not in token:
+            if "_POSITIONAL" not in params:
+                params["_POSITIONAL"] = token
             continue
         key, value = token.split("=", 1)
         params[key.strip()] = parse_value(value.strip())
     return params
 
 
-def parse_jcl(lines: List[str]) -> List[Dict[str, object]]:
-    result: List[Dict[str, object]] = []
+def _needs_continuation(text: str) -> bool:
+    """True if the operand field ends with an unclosed paren or a trailing comma."""
+    depth = 0
+    quote: Optional[str] = None
+    stripped = text.rstrip()
+
+    for char in stripped:
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+
+    return depth > 0 or stripped.endswith(",")
+
+
+def merge_continuations(lines: List[str]) -> List[str]:
+    """Join JCL continuation lines (trailing comma / unclosed paren) into one logical line."""
+    merged: List[str] = []
+    buffer: Optional[str] = None
 
     for raw_line in lines:
-        line = raw_line.rstrip()
+        line = raw_line.rstrip("\n")
+
+        if line.startswith("//*"):
+            if buffer is not None:
+                merged.append(buffer)
+                buffer = None
+            merged.append(line)
+            continue
+
+        if buffer is not None and _needs_continuation(buffer):
+            cont_match = CONT_RE.match(line)
+            if cont_match:
+                buffer = buffer.rstrip() + cont_match.group(1)
+                continue
+
+        if buffer is not None:
+            merged.append(buffer)
+        buffer = line
+
+    if buffer is not None:
+        merged.append(buffer)
+
+    return merged
+
+
+def _is_instream(remainder: str) -> bool:
+    tokens = split_params(remainder.strip())
+    return bool(tokens) and tokens[0] in ("*", "DATA")
+
+
+def _instream_delimiter(params: Dict[str, ParamValue]) -> str:
+    dlm = params.get("DLM")
+    if isinstance(dlm, str) and dlm:
+        return dlm
+    return "/*"
+
+
+def parse_jcl(lines: List[str]) -> List[Dict[str, object]]:
+    result: List[Dict[str, object]] = []
+    merged_lines = merge_continuations(lines)
+
+    idx = 0
+    while idx < len(merged_lines):
+        line = merged_lines[idx].rstrip()
+        idx += 1
+
         if not line or line.startswith("//*"):
             continue
 
         match = LINE_RE.match(line)
-        if not match:
-            continue
+        concatenated = False
 
-        name, statement_type, remainder = match.groups()
-        result.append(
-            {
-                "type": statement_type,
-                "name": name,
-                "params": parse_params(remainder),
-            }
-        )
+        if match:
+            name, statement_type, remainder = match.groups()
+        else:
+            anon_match = ANON_RE.match(line)
+            if not anon_match:
+                continue
+            name = None
+            statement_type = anon_match.group(1)
+            remainder = anon_match.group(2)
+            if statement_type == "DD":
+                concatenated = True
+
+        params = parse_params(remainder)
+        statement: Dict[str, object] = {
+            "type": statement_type,
+            "name": name,
+            "params": params,
+        }
+        if concatenated:
+            statement["concatenated"] = True
+
+        if statement_type == "DD" and _is_instream(remainder):
+            delimiter = _instream_delimiter(params)
+            data_lines: List[str] = []
+            while idx < len(merged_lines):
+                candidate = merged_lines[idx].rstrip("\n")
+                if candidate.rstrip() == delimiter or candidate.startswith(delimiter):
+                    idx += 1
+                    break
+                data_lines.append(candidate)
+                idx += 1
+            statement["instream"] = data_lines
+
+        result.append(statement)
 
     return result
 

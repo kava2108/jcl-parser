@@ -10,16 +10,21 @@ JCL の JOB / EXEC / DD ステートメントを簡易解析し、JSON 形式で
 
 ## Features
 
-- JOB / EXEC / DD を対象にした簡易パース
+- JOB / EXEC / DD / PROC / PEND / SET を対象にした簡易パース
 - KEY=VALUE 形式のパラメータ抽出（括弧・ネスト対応）
 - `DISP=(NEW,CATLG,DELETE)` → 位置指定リストに変換
 - `DCB=(RECFM=FB,LRECL=80)` → キーワードサブパラメータに変換
 - `SPACE=(CYL,(10,5),RLSE)` → ネスト構造に変換
 - `PARM=(OPT1,OPT2)` → リストに変換
+- 継続行（トレーリングカンマ・開き括弧未クローズ）のマージ
+- 匿名DD（DD連結）・インストリームデータ（`DD *` / `DD DATA`）対応
+- inline PROC/PEND 展開・シンボリックパラメータ（`&VAR`）置換・ステップ限定DDオーバーライド
+- DSN依存関係解析（ジョブ内の読み書き順序グラフ）
+- DISP/ENQ競合検出（重複NEW・削除後参照・未生成入力・ジョブ横断ENQ疑い）
 - JOB → EXEC(steps) → DD(dds) の AST 形式で出力
 - コメント行（//*）を無視
 - JSON 形式で標準出力に出力
-- 標準ライブラリのみで動作
+- 標準ライブラリ + Pydantic のみで動作
 
 ---
 
@@ -111,20 +116,49 @@ JCL の各ステップを GitHub Actions の job に変換します。
 | DD DSN= | job の `env:` (DD\_名前=DSN値) |
 | 複数 EXEC | `needs:` で直列チェーン |
 
+## 静的解析レイヤー (jcl_analyze.py)
+
+```bash
+python jcl_analyze.py job1.jcl [job2.jcl ...]
+```
+
+inline PROC 展開 → DSN依存関係解析 → DISP/ENQ競合検出 を一括実行し、`warnings` / `dsn_usages` / `conflicts` を含む JSON レポートを出力します。複数ファイルを渡すとジョブ横断でのDSN競合(R4)も検出します。
+
+**検出ルール:**
+
+| ルール | 内容 | severity |
+|---|---|---|
+| R1 | 同一DSNへの重複NEW(DELETE未経由) | error |
+| R2 | ジョブ内で最初の参照がOLD/SHR/MOD(先行NEWなし) | info |
+| R3 | 正常終了ディスポジションDELETE後の再参照 | error |
+| R4 | 複数ジョブが同一DSNに排他DISP(OLD/NEW)を持つ | warning |
+
+**スコープ制限:**
+
+- inline (`PROC`〜`PEND`) の展開のみサポート。外部PROCLIBの解決は非対応(未解決参照は`warnings`に記録)
+- ジョブ内のステップは順次実行される前提(COND による分岐・スキップは考慮しない)
+- ジョブ横断のENQ競合(R4)は実行順序が不明なためヒューリスティックな警告であり、確定エラーではない
+
+---
+
 ## Project Structure
 
-- `jcl_parser.py`: JCL を JSON AST に変換する本体
+- `jcl_parser.py`: JCL を JSON AST に変換する本体(継続行マージ・DD連結・インストリームデータを含む)
 - `jcl_models.py`: Pydantic モデル定義 (`--schema` で JSON Schema 出力)
+- `jcl_proc.py`: inline PROC/PEND 展開・シンボリックパラメータ置換
+- `jcl_dsn.py`: DSN依存関係解析
+- `jcl_disp_check.py`: DISP/ENQ競合検出ルール
+- `jcl_analyze.py`: 静的解析レイヤーのCLIエントリポイント
 - `jcl_to_gha.py`: AST を GitHub Actions YAML に変換
 - `sample.jcl`: 動作確認用のサンプル
-- `tests/test_jcl_parser.py`: 回帰テスト
+- `tests/`: 回帰テスト一式
 
 ---
 
 ## Future Work
 
-- DD ライフサイクル対応（`DISP=(NEW,CATLG,DELETE)` → `upload-artifact` / `download-artifact` の自動挿入）
-- JCL 条件制御（COND パラメータ）の解析と GHA の `if:` 条件への変換
-- 継続行（カラム 72 折り返し）のサポート
-- PROC / INCLUDE の展開
+- DD ライフサイクル対応(`DISP=(NEW,CATLG,DELETE)` → `upload-artifact` / `download-artifact` の自動挿入)
+- JCL 条件制御(COND パラメータ)の解析と GHA の `if:` 条件への変換
+- 外部PROCLIBの解決(ライブラリディレクトリを指定してのPROC参照解決)
+- COND を考慮したステップ実行順序のモデル化(DISP/ENQ検出の精度向上)
 # jcl-parser
