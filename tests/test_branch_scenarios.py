@@ -111,19 +111,43 @@ class CondImplicitBranchTest(unittest.TestCase):
         dd_names = [s["name"] for s in run_scenario.statements if s["type"] == "DD"]
         self.assertEqual(dd_names, ["DD1"])
 
-    def test_cond_even_and_only_are_not_branched(self) -> None:
-        for keyword in ("EVEN", "ONLY"):
-            with self.subTest(keyword=keyword):
-                lines = [
-                    "//JOB1  JOB  CLASS=A\n",
-                    "//S1    EXEC PGM=P1\n",
-                    f"//S2    EXEC PGM=P2,COND={keyword}\n",
-                ]
-                scenarios, warnings = build_scenarios(parse_jcl(lines))
-                self.assertEqual(warnings, [])
-                self.assertEqual(len(scenarios), 1)
-                self.assertEqual(scenarios[0].label, "default")
-                self.assertEqual(_exec_names(scenarios[0]), ["S1", "S2"])
+    def test_cond_even_is_not_branched_and_step_stays(self) -> None:
+        lines = [
+            "//JOB1  JOB  CLASS=A\n",
+            "//S1    EXEC PGM=P1\n",
+            "//S2    EXEC PGM=P2,COND=EVEN\n",
+        ]
+        scenarios, warnings = build_scenarios(parse_jcl(lines))
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(scenarios), 1)
+        self.assertEqual(scenarios[0].label, "default")
+        self.assertEqual(_exec_names(scenarios[0]), ["S1", "S2"])
+
+    def test_cond_only_excludes_the_step_with_a_warning(self) -> None:
+        lines = [
+            "//JOB1  JOB  CLASS=A\n",
+            "//S1    EXEC PGM=P1\n",
+            "//S2    EXEC PGM=P2,COND=ONLY\n",
+            "//DD1   DD   DSN=A.FILE,DISP=SHR\n",
+            "//S3    EXEC PGM=P3\n",
+        ]
+        scenarios, warnings = build_scenarios(parse_jcl(lines))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("COND=ONLY", warnings[0])
+        self.assertIn("S2", warnings[0])
+        self.assertEqual(len(scenarios), 1)
+        self.assertEqual(_exec_names(scenarios[0]), ["S1", "S3"])
+
+    def test_cond_only_combined_with_rc_test_is_still_excluded(self) -> None:
+        lines = [
+            "//JOB1  JOB  CLASS=A\n",
+            "//S1    EXEC PGM=P1\n",
+            "//S2    EXEC PGM=P2,COND=((4,LT),ONLY)\n",
+        ]
+        scenarios, warnings = build_scenarios(parse_jcl(lines))
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(len(scenarios), 1)
+        self.assertEqual(_exec_names(scenarios[0]), ["S1"])
 
     def test_multiple_cond_steps_combine_with_explicit_if(self) -> None:
         lines = [

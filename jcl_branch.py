@@ -31,19 +31,51 @@ def _cond_to_str(value: object) -> str:
     return str(value)
 
 
-def _has_branchable_cond(stmt: Dict[str, object]) -> bool:
-    """True for a normal COND=(code,op[,step]) test on an EXEC step.
+def _cond_tokens(value: object) -> List[str]:
+    """Flatten a parsed COND value into its leaf string tokens (EVEN, ONLY, RC codes, ...)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        tokens: List[str] = []
+        for v in value:
+            tokens.extend(_cond_tokens(v))
+        return tokens
+    return []
 
-    COND=EVEN/COND=ONLY are excluded: they don't compare an RC, they change
-    whether this step runs after an earlier ABEND, which is a different kind
-    of uncertainty than a skip/run branch and isn't modeled here.
-    """
+
+def _cond_value(stmt: Dict[str, object]) -> object:
     if stmt.get("type") != "EXEC":
-        return False
-    cond = stmt.get("params", {}).get("COND")  # type: ignore[union-attr]
+        return None
+    return stmt.get("params", {}).get("COND")  # type: ignore[union-attr]
+
+
+def _is_only_guarded(stmt: Dict[str, object]) -> bool:
+    """True if COND=ONLY appears anywhere in this step's COND (bare or combined
+    with an RC test, e.g. COND=((4,LT),ONLY)).
+
+    ONLY means "run this step only after an earlier step ABENDed." This tool
+    assumes normal completion throughout (no ABEND modeling), so under that
+    assumption such a step deterministically never runs - it's excluded from
+    analysis entirely rather than turned into a SKIP/RUN branch.
+    """
+    cond = _cond_value(stmt)
     if not cond:
         return False
-    if isinstance(cond, str) and cond.upper() in ("EVEN", "ONLY"):
+    return any(tok.upper() == "ONLY" for tok in _cond_tokens(cond))
+
+
+def _has_branchable_cond(stmt: Dict[str, object]) -> bool:
+    """True for a COND= that should become a SKIP/RUN branch.
+
+    A bare COND=EVEN is excluded: under the no-ABEND assumption it behaves
+    like an unconditional step (EVEN only matters when a prior step actually
+    ABENDed), so there's no useful skip/run branch to model. COND=ONLY is
+    handled separately by `_is_only_guarded` (full exclusion, not a branch).
+    """
+    cond = _cond_value(stmt)
+    if not cond:
+        return False
+    if isinstance(cond, str) and cond.upper() == "EVEN":
         return False
     return True
 
@@ -62,16 +94,21 @@ def _consume_step_group(
 
 
 def _parse_sequence(
-    statements: List[Dict[str, object]], idx: int, wrap_cond: bool
+    statements: List[Dict[str, object]],
+    idx: int,
+    wrap_cond: bool,
+    excluded_only_steps: List[str],
 ) -> Tuple[List[Node], int]:
     """Recursive-descent parse into a node tree.
 
     `// IF ... THEN / ELSE / ENDIF` markers are always turned into IfNodes (and
-    consumed as control structure, not present in the output). When `wrap_cond`
-    is True, an EXEC step carrying a branchable COND= is *also* turned into an
-    implicit IfNode: COND tests true -> the step is bypassed (empty branch),
-    tests false -> the step (and its DDs) run. We can never know which at
-    analysis time, so both are modeled as scenarios, same as an explicit IF.
+    consumed as control structure, not present in the output). A COND=ONLY step
+    is dropped entirely (see `_is_only_guarded`) and its name recorded. When
+    `wrap_cond` is True, any other EXEC step carrying a branchable COND= is
+    turned into an implicit IfNode: COND test true -> the step is bypassed
+    (empty branch), false -> the step (and its DDs) run. We can never know
+    which at analysis time, so both are modeled as scenarios, same as an
+    explicit IF.
     """
     nodes: List[Node] = []
     n = len(statements)
@@ -84,17 +121,22 @@ def _parse_sequence(
         if stmt["type"] == "IF":
             condition = str(stmt.get("condition", ""))
             idx += 1
-            then_nodes, idx = _parse_sequence(statements, idx, wrap_cond)
+            then_nodes, idx = _parse_sequence(statements, idx, wrap_cond, excluded_only_steps)
 
             else_nodes: List[Node] = []
             if idx < n and statements[idx]["type"] == "ELSE":
                 idx += 1
-                else_nodes, idx = _parse_sequence(statements, idx, wrap_cond)
+                else_nodes, idx = _parse_sequence(statements, idx, wrap_cond, excluded_only_steps)
 
             if idx < n and statements[idx]["type"] == "ENDIF":
                 idx += 1
 
             nodes.append(IfNode(condition=condition, then_branch=then_nodes, else_branch=else_nodes))
+            continue
+
+        if stmt["type"] == "EXEC" and _is_only_guarded(stmt):
+            excluded_only_steps.append(str(stmt.get("name")))
+            _, idx = _consume_step_group(statements, idx)
             continue
 
         if wrap_cond and _has_branchable_cond(stmt):
@@ -162,6 +204,9 @@ def build_scenarios(
     individual EXEC steps. Statements outside any branch are present in every
     scenario. Input with no branching at all yields a single "default" scenario.
 
+    A COND=ONLY step is excluded from analysis entirely (see `_is_only_guarded`)
+    and reported in the returned warnings.
+
     COND= steps can be numerous in legacy JCL (a COND guarding nearly every
     step is a common pattern), and each one doubles the scenario count. If
     modeling all of them would exceed `max_scenarios`, COND-driven branching is
@@ -169,8 +214,9 @@ def build_scenarios(
     a warning is returned instead.
     """
     warnings: List[str] = []
+    excluded_only_steps: List[str] = []
 
-    nodes, _ = _parse_sequence(statements, 0, wrap_cond=True)
+    nodes, _ = _parse_sequence(statements, 0, wrap_cond=True, excluded_only_steps=excluded_only_steps)
     if _count_variants(nodes) > max_scenarios:
         cond_count = sum(1 for s in statements if _has_branchable_cond(s))
         warnings.append(
@@ -178,7 +224,17 @@ def build_scenarios(
             f"produce more than {max_scenarios} scenarios; their DSN usages are only "
             "flagged as conditional, not split into separate scenarios"
         )
-        nodes, _ = _parse_sequence(statements, 0, wrap_cond=False)
+        excluded_only_steps = []
+        nodes, _ = _parse_sequence(
+            statements, 0, wrap_cond=False, excluded_only_steps=excluded_only_steps
+        )
+
+    if excluded_only_steps:
+        warnings.append(
+            f"excluded {len(excluded_only_steps)} COND=ONLY step(s) from analysis "
+            "(they only run after an earlier step ABENDs, which this tool assumes "
+            "doesn't happen): " + ", ".join(excluded_only_steps)
+        )
 
     flattened = _flatten(nodes)
 
