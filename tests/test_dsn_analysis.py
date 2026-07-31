@@ -57,6 +57,29 @@ class CollectDsnUsagesTest(unittest.TestCase):
         self.assertEqual(usages[0].dsn, "HLQ.GDG")
 
 
+class ScenarioAndConditionalTest(unittest.TestCase):
+    def test_scenario_label_is_stamped_on_every_usage(self) -> None:
+        lines = [
+            "//JOB1  JOB  CLASS=A\n",
+            "//STEP1 EXEC PGM=PROG1\n",
+            "//IN1   DD   DSN=A.FILE,DISP=SHR\n",
+        ]
+        usages = collect_dsn_usages(_model(lines), scenario="(S1.RC = 0):THEN")
+        self.assertEqual(usages[0].scenario, "(S1.RC = 0):THEN")
+
+    def test_cond_marks_step_dds_as_conditional(self) -> None:
+        lines = [
+            "//JOB1  JOB  CLASS=A\n",
+            "//STEP1 EXEC PGM=PROG1,COND=(4,LT)\n",
+            "//IN1   DD   DSN=A.FILE,DISP=SHR\n",
+            "//STEP2 EXEC PGM=PROG2\n",
+            "//IN2   DD   DSN=B.FILE,DISP=SHR\n",
+        ]
+        usages = collect_dsn_usages(_model(lines))
+        self.assertTrue(usages[0].conditional)
+        self.assertFalse(usages[1].conditional)
+
+
 class BuildDsnGraphTest(unittest.TestCase):
     def test_groups_usages_by_dsn_in_order(self) -> None:
         lines = [

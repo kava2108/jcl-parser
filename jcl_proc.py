@@ -192,6 +192,8 @@ def expand_procs(
                 "name": inner["name"],
                 "params": substitute_symbols(inner["params"], symtab, unresolved),
             }
+            if "condition" in inner:
+                cloned["condition"] = substitute_symbols(inner["condition"], symtab, unresolved)
             if inner["type"] == "EXEC":
                 current_proc_step_name = inner["name"]  # type: ignore[assignment]
                 cloned["name"] = f"{calling_step}.{inner['name']}"

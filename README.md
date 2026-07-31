@@ -122,15 +122,19 @@ JCL の各ステップを GitHub Actions の job に変換します。
 python jcl_analyze.py job1.jcl [job2.jcl ...] [--proclib DIR ...]
 ```
 
-PROC展開(inline + 外部PROCLIB) → DSN依存関係解析 → DISP/ENQ競合検出 を一括実行し、`warnings` / `dsn_usages` / `conflicts` を含む JSON レポートを出力します。複数ファイルを渡すとジョブ横断でのDSN競合(R4)も検出します。
+PROC展開(inline + 外部PROCLIB) → IF/THEN/ELSE分岐のシナリオ展開 → DSN依存関係解析 → DISP/ENQ競合検出 を一括実行し、`warnings` / `dsn_usages` / `conflicts` を含む JSON レポートを出力します。複数ファイルを渡すとジョブ横断でのDSN競合(R4)も検出します。
 
 `--proclib DIR` は繰り返し指定可能で、実際のPROCLIB連結と同様に先に指定したディレクトリが優先されます。ディレクトリ内のファイル名(大文字化)がプロシージャ名になり、`//name PROC ... PEND` を含むメンバーも、PROC/PENDを省略した素のEXEC/DD本体だけのメンバーも読み込めます。同名がJCL内のinline PROCにもある場合は、inline側が優先されます。
+
+**条件分岐の扱い:** `// IF (...) THEN` / `// ELSE` / `// ENDIF` に加えて、個別EXEC文の `COND=(code,op[,step])` も「スキップされる/実行される」の2値分岐(SKIP/RUN)として扱われ、構文上排他な実行パス(シナリオ)としてモデル化されます([jcl_branch.py](jcl_branch.py))。各シナリオごとに独立してDSN解析・DISP競合検出が行われるため、THEN/ELSEやSKIP/RUNでそれぞれ別々に同じDSNをNEW作成しても、両方が同時には起こらないため誤検知しません。実際のRC値は静的解析では分からないため、「真偽どちらかは確定できないが、両方のシナリオを網羅する」というアプローチです。COND由来のDDには `conditional: true` も併せて付与されます。`COND=EVEN`/`COND=ONLY` はRC比較ではなく異常終了時の挙動変更なので分岐対象外です(未モデル化)。
+
+**シナリオ数の安全弁:** COND=付きステップはレガシーJCLで大量に存在しうるため(ステップごとに前段RCをチェックする形が典型)、シナリオ数はデカルト積で爆発しえます。COND由来の分岐だけで合計シナリオ数が64([jcl_branch.py](jcl_branch.py) の `DEFAULT_MAX_SCENARIOS`)を超える場合、COND分岐だけを無効化して `conditional` フラグのみの従来動作にフォールバックし、`warnings` にその旨を記録します。ユーザーが明示的に書いた `IF/THEN/ELSE` はこの安全弁の対象外で、常に完全展開されます。
 
 **検出ルール:**
 
 | ルール | 内容 | severity |
 |---|---|---|
-| R1 | 同一DSNへの重複NEW(DELETE未経由) | error |
+| R1 | 同一DSN・同一シナリオ内での重複NEW(DELETE未経由) | error |
 | R2 | ジョブ内で最初の参照がOLD/SHR/MOD(先行NEWなし) | info |
 | R3 | 正常終了ディスポジションDELETE後の再参照 | error |
 | R4 | 複数ジョブが同一DSNに排他DISP(OLD/NEW)を持つ | warning |
@@ -139,7 +143,8 @@ PROC展開(inline + 外部PROCLIB) → DSN依存関係解析 → DISP/ENQ競合�
 **スコープ制限:**
 
 - PROC解決は inline (`PROC`〜`PEND`) と `--proclib` で指定したディレクトリのみ対応。どちらにも見つからない参照は`warnings`に記録される
-- ジョブ内のステップは順次実行される前提(COND による分岐・スキップは考慮しない)
+- 分岐外のステップは順次実行される前提(異常終了時のデフォルトバイパス挙動、`COND=EVEN`/`COND=ONLY` はモデル化しない)
+- IF条件式の中身(`STEP1.RC = 0` など)は評価しない。構造的な排他性のみを利用する(連続・ネストしたIFの条件間の相関は考慮しない)
 - ジョブ横断のENQ競合(R4)は実行順序が不明なためヒューリスティックな警告であり、確定エラーではない
 
 ---
@@ -149,7 +154,8 @@ PROC展開(inline + 外部PROCLIB) → DSN依存関係解析 → DISP/ENQ競合�
 - `jcl_parser.py`: JCL を JSON AST に変換する本体(継続行マージ・DD連結・インストリームデータを含む)
 - `jcl_models.py`: Pydantic モデル定義 (`--schema` で JSON Schema 出力)
 - `jcl_proc.py`: PROC/PEND 展開(inline + 外部PROCLIB)・シンボリックパラメータ置換
-- `jcl_dsn.py`: DSN依存関係解析
+- `jcl_branch.py`: IF/THEN/ELSE/ENDIF と COND= を排他シナリオへ分岐展開(シナリオ数上限つき)
+- `jcl_dsn.py`: DSN依存関係解析(シナリオ・COND条件付きフラグ対応)
 - `jcl_disp_check.py`: DISP/ENQ競合検出ルール
 - `jcl_analyze.py`: 静的解析レイヤーのCLIエントリポイント
 - `jcl_to_gha.py`: AST を GitHub Actions YAML に変換
@@ -162,6 +168,6 @@ PROC展開(inline + 外部PROCLIB) → DSN依存関係解析 → DISP/ENQ競合�
 
 - DD ライフサイクル対応(`DISP=(NEW,CATLG,DELETE)` → `upload-artifact` / `download-artifact` の自動挿入)
 - JCL 条件制御(COND パラメータ)の解析と GHA の `if:` 条件への変換
-- COND/RC分岐の意味解析(ステップ実行有無をモデル化し、DISP/ENQ検出の精度を上げる)
+- `COND=EVEN`/`COND=ONLY`(異常終了時のバイパス挙動変更)のモデル化
 - ジョブ横断ENQの確定判定(実行スケジュール情報との連携が必要)
 # jcl-parser

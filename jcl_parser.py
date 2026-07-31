@@ -4,8 +4,9 @@ import sys
 from typing import Dict, List, Optional, Union
 
 LINE_RE = re.compile(r"^//(\S+)\s+(JOB|EXEC|DD|PROC|PEND)\b(.*)$")
-ANON_RE = re.compile(r"^//\s+(DD|SET|PEND)\b(.*)$")
+ANON_RE = re.compile(r"^//\s+(DD|SET|PEND|IF|ELSE|ENDIF)\b(.*)$")
 CONT_RE = re.compile(r"^//\s+(\S.*)$")
+TRAILING_THEN_RE = re.compile(r"\bTHEN\s*$", re.IGNORECASE)
 
 ParamValue = Union[str, List, Dict]
 
@@ -166,7 +167,13 @@ def parse_jcl(lines: List[str]) -> List[Dict[str, object]]:
             if statement_type == "DD":
                 concatenated = True
 
-        params = parse_params(remainder)
+        if statement_type == "IF":
+            # `(STEP1.RC=0) THEN` isn't KEY=VALUE data; keep it as a raw condition
+            # string instead of running it through parse_params.
+            params: Dict[str, ParamValue] = {}
+        else:
+            params = parse_params(remainder)
+
         statement: Dict[str, object] = {
             "type": statement_type,
             "name": name,
@@ -174,6 +181,8 @@ def parse_jcl(lines: List[str]) -> List[Dict[str, object]]:
         }
         if concatenated:
             statement["concatenated"] = True
+        if statement_type == "IF":
+            statement["condition"] = TRAILING_THEN_RE.sub("", remainder.strip()).strip()
 
         if statement_type == "DD" and _is_instream(remainder):
             delimiter = _instream_delimiter(params)

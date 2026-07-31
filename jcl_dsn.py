@@ -16,6 +16,8 @@ class DsnUsage:
     disp_abnormal: Optional[str]
     order: int
     job_name: Optional[str] = None
+    scenario: Optional[str] = None
+    conditional: bool = False
 
 
 def _disp_parts(disp: object) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -35,11 +37,18 @@ def _normalize_dsn(dsn: str) -> str:
     return dsn
 
 
-def collect_dsn_usages(model: JobAST) -> List[DsnUsage]:
-    """Flatten DSN+DISP info from every DD across an (expanded) job's steps, in step order."""
+def collect_dsn_usages(model: JobAST, scenario: Optional[str] = None) -> List[DsnUsage]:
+    """Flatten DSN+DISP info from every DD across an (expanded) job's steps, in step order.
+
+    `scenario` tags every usage with the branch (IF/THEN/ELSE) it came from, if any
+    (see jcl_branch.py). A step whose EXEC carries a non-empty COND= is marked
+    `conditional=True`: COND depends on a runtime RC value we can't know statically,
+    so its DDs are flagged as uncertain rather than split into separate scenarios.
+    """
     usages: List[DsnUsage] = []
     order = 0
     for step in model.steps:
+        conditional = bool(step.params.get("COND"))
         for dd in step.dds:
             dsn = dd.params.get("DSN")
             if not isinstance(dsn, str) or not dsn:
@@ -55,6 +64,8 @@ def collect_dsn_usages(model: JobAST) -> List[DsnUsage]:
                     disp_abnormal=abnormal,
                     order=order,
                     job_name=model.name,
+                    scenario=scenario,
+                    conditional=conditional,
                 )
             )
             order += 1

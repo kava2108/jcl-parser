@@ -1,5 +1,6 @@
 import unittest
 
+from jcl_branch import build_scenarios
 from jcl_disp_check import check_disp_conflicts
 from jcl_dsn import build_dsn_graph, collect_dsn_usages
 from jcl_models import to_model
@@ -9,6 +10,16 @@ from jcl_parser import build_ast, parse_jcl
 def _usages(lines):
     model = to_model(build_ast(parse_jcl(lines)))
     return collect_dsn_usages(model)
+
+
+def _usages_with_scenarios(lines):
+    statements = parse_jcl(lines)
+    scenarios, _ = build_scenarios(statements)
+    usages = []
+    for scenario in scenarios:
+        model = to_model(build_ast(scenario.statements))
+        usages.extend(collect_dsn_usages(model, scenario=scenario.label))
+    return usages
 
 
 class DuplicateNewTest(unittest.TestCase):
@@ -136,6 +147,82 @@ class CleanJobTest(unittest.TestCase):
         ]
         conflicts = check_disp_conflicts(build_dsn_graph(_usages(lines)))
         self.assertEqual(conflicts, [])
+
+
+class BranchAwareConflictTest(unittest.TestCase):
+    def test_duplicate_new_across_mutually_exclusive_branches_is_not_flagged(self) -> None:
+        lines = [
+            "//JOB1   JOB  CLASS=A\n",
+            "// IF (S1.RC = 0) THEN\n",
+            "//STEPA  EXEC PGM=PA\n",
+            "//DD1    DD   DSN=X.FILE,DISP=(NEW,CATLG)\n",
+            "// ELSE\n",
+            "//STEPB  EXEC PGM=PB\n",
+            "//DD2    DD   DSN=X.FILE,DISP=(NEW,CATLG)\n",
+            "// ENDIF\n",
+        ]
+        conflicts = check_disp_conflicts(build_dsn_graph(_usages_with_scenarios(lines)))
+        self.assertEqual(conflicts, [])
+
+    def test_duplicate_new_within_same_branch_is_still_flagged(self) -> None:
+        lines = [
+            "//JOB1   JOB  CLASS=A\n",
+            "// IF (S1.RC = 0) THEN\n",
+            "//STEPA  EXEC PGM=PA\n",
+            "//DD1    DD   DSN=X.FILE,DISP=(NEW,CATLG)\n",
+            "//STEPB  EXEC PGM=PB\n",
+            "//DD2    DD   DSN=X.FILE,DISP=(NEW,CATLG)\n",
+            "// ELSE\n",
+            "//STEPC  EXEC PGM=PC\n",
+            "// ENDIF\n",
+        ]
+        conflicts = check_disp_conflicts(build_dsn_graph(_usages_with_scenarios(lines)))
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0].severity, "error")
+        self.assertIn("STEPB", conflicts[0].reason)
+
+    def test_pass_precision_improves_when_claiming_step_is_cond_guarded(self) -> None:
+        # STEP1 passes X.FILE forward. STEP2 (guarded by COND) is the only step
+        # that claims it. Before COND-branching, STEP2 always appeared to claim
+        # it, hiding the real risk that STEP2 might be skipped. Now the SKIP
+        # scenario correctly shows nothing claims it (R5 fires there), while the
+        # RUN scenario shows it being claimed (no R5 there).
+        lines = [
+            "//JOB1  JOB  CLASS=A\n",
+            "//STEP1 EXEC PGM=P1\n",
+            "//DD1   DD   DSN=X.FILE,DISP=(NEW,PASS)\n",
+            "//STEP2 EXEC PGM=P2,COND=(4,LT)\n",
+            "//DD2   DD   DSN=X.FILE,DISP=(OLD,DELETE)\n",
+        ]
+        conflicts = check_disp_conflicts(build_dsn_graph(_usages_with_scenarios(lines)))
+        pass_conflicts = [c for c in conflicts if "PASS" in c.reason]
+        self.assertEqual(len(pass_conflicts), 1)
+        self.assertEqual(pass_conflicts[0].scenario, "COND=(4,LT):SKIP")
+        self.assertIn("STEP1", pass_conflicts[0].reason)
+
+    def test_cond_on_a_step_marks_resulting_conflict_conditional(self) -> None:
+        lines = [
+            "//JOB1  JOB  CLASS=A\n",
+            "//STEP1 EXEC PGM=P1\n",
+            "//DD1   DD   DSN=X.FILE,DISP=(NEW,CATLG)\n",
+            "//STEP2 EXEC PGM=P2,COND=(4,LT)\n",
+            "//DD2   DD   DSN=X.FILE,DISP=(NEW,CATLG)\n",
+        ]
+        conflicts = check_disp_conflicts(build_dsn_graph(_usages_with_scenarios(lines)))
+        self.assertEqual(len(conflicts), 1)
+        self.assertTrue(conflicts[0].conditional)
+
+    def test_unconditional_duplicate_new_is_not_marked_conditional(self) -> None:
+        lines = [
+            "//JOB1  JOB  CLASS=A\n",
+            "//STEP1 EXEC PGM=P1\n",
+            "//DD1   DD   DSN=X.FILE,DISP=(NEW,CATLG)\n",
+            "//STEP2 EXEC PGM=P2\n",
+            "//DD2   DD   DSN=X.FILE,DISP=(NEW,CATLG)\n",
+        ]
+        conflicts = check_disp_conflicts(build_dsn_graph(_usages_with_scenarios(lines)))
+        self.assertEqual(len(conflicts), 1)
+        self.assertFalse(conflicts[0].conditional)
 
 
 if __name__ == "__main__":

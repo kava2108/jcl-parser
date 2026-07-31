@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Tuple
 
 from jcl_dsn import DsnUsage
 
@@ -16,6 +16,8 @@ class DispConflict:
     severity: Severity
     reason: str
     usages: List[DsnUsage]
+    scenario: Optional[str] = None
+    conditional: bool = False
 
 
 def _by_job(usages: List[DsnUsage]) -> Dict[Optional[str], List[DsnUsage]]:
@@ -25,21 +27,36 @@ def _by_job(usages: List[DsnUsage]) -> Dict[Optional[str], List[DsnUsage]]:
     return grouped
 
 
+def _by_job_and_scenario(
+    usages: List[DsnUsage],
+) -> Dict[Tuple[Optional[str], Optional[str]], List[DsnUsage]]:
+    grouped: Dict[Tuple[Optional[str], Optional[str]], List[DsnUsage]] = {}
+    for usage in usages:
+        grouped.setdefault((usage.job_name, usage.scenario), []).append(usage)
+    return grouped
+
+
 def _check_single_job_rules(dsn: str, usages: List[DsnUsage]) -> List[DispConflict]:
     """R1 (duplicate NEW), R2 (read before create), R3 (use after delete),
     R5 (PASS never reclaimed).
 
-    Assumes `usages` are already in the sequential step order of a single job.
+    Assumes `usages` are already in the sequential step order of a single
+    (job, scenario) pair — see jcl_branch.py for how mutually-exclusive
+    IF/THEN/ELSE branches are split into separate scenarios before this runs,
+    so a NEW in one branch is never compared against a NEW in another.
     """
     conflicts: List[DispConflict] = []
     created = False
     deleted = False
     read_before_create_flagged = False
+    any_conditional = False
     last_index = len(usages) - 1
+    scenario = usages[0].scenario if usages else None
 
     for index, usage in enumerate(usages):
         status = (usage.disp_status or "").upper()
         normal = (usage.disp_normal or "").upper()
+        any_conditional = any_conditional or usage.conditional
 
         if deleted:
             conflicts.append(
@@ -51,6 +68,8 @@ def _check_single_job_rules(dsn: str, usages: List[DsnUsage]) -> List[DispConfli
                         "after it was deleted by an earlier step"
                     ),
                     usages=[usage],
+                    scenario=scenario,
+                    conditional=any_conditional,
                 )
             )
 
@@ -65,6 +84,8 @@ def _check_single_job_rules(dsn: str, usages: List[DsnUsage]) -> List[DispConfli
                             "but an earlier step already created it without freeing it"
                         ),
                         usages=[usage],
+                        scenario=scenario,
+                        conditional=any_conditional,
                     )
                 )
             created = True
@@ -79,6 +100,8 @@ def _check_single_job_rules(dsn: str, usages: List[DsnUsage]) -> List[DispConfli
                         "possibly an external/pre-existing dataset"
                     ),
                     usages=[usage],
+                    scenario=scenario,
+                    conditional=any_conditional,
                 )
             )
             read_before_create_flagged = True
@@ -103,6 +126,8 @@ def _check_single_job_rules(dsn: str, usages: List[DsnUsage]) -> List[DispConfli
                         "deleted at job end"
                     ),
                     usages=[usage],
+                    scenario=scenario,
+                    conditional=any_conditional,
                 )
             )
 
@@ -115,7 +140,9 @@ def _check_cross_job_rule(
     """R4: two or more jobs both hold an exclusive DISP on the same DSN.
 
     JCL alone can't prove whether these jobs run concurrently, so this is a
-    heuristic warning, not a hard error.
+    heuristic warning, not a hard error. Scenario branching (R1-R3/R5) doesn't
+    apply here: this rule already compares across job boundaries, not within
+    one job's conditional execution paths.
     """
     if len(by_job) < 2:
         return []
@@ -140,6 +167,7 @@ def _check_cross_job_rule(
                 "execution order between them is unknown from JCL alone"
             ),
             usages=involved,
+            conditional=any(u.conditional for u in involved),
         )
     ]
 
@@ -147,8 +175,7 @@ def _check_cross_job_rule(
 def check_disp_conflicts(dsn_graph: Dict[str, List[DsnUsage]]) -> List[DispConflict]:
     conflicts: List[DispConflict] = []
     for dsn, usages in dsn_graph.items():
-        by_job = _by_job(usages)
-        for job_usages in by_job.values():
-            conflicts.extend(_check_single_job_rules(dsn, job_usages))
-        conflicts.extend(_check_cross_job_rule(dsn, by_job))
+        for group_usages in _by_job_and_scenario(usages).values():
+            conflicts.extend(_check_single_job_rules(dsn, group_usages))
+        conflicts.extend(_check_cross_job_rule(dsn, _by_job(usages)))
     return conflicts

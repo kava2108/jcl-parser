@@ -6,6 +6,7 @@ import sys
 from dataclasses import asdict
 from typing import Dict, List, Tuple
 
+from jcl_branch import build_scenarios
 from jcl_disp_check import check_disp_conflicts
 from jcl_dsn import DsnUsage, build_dsn_graph, collect_dsn_usages
 from jcl_models import JobAST, to_model
@@ -13,14 +14,20 @@ from jcl_parser import build_ast, parse_jcl
 from jcl_proc import ProcDef, expand_procs, extract_procs, load_proc_library
 
 
-def analyze_file(path: str, external_procs: Dict[str, ProcDef]) -> Tuple[JobAST, List[str]]:
+def analyze_file(
+    path: str, external_procs: Dict[str, ProcDef]
+) -> Tuple[List[Tuple[str, JobAST]], List[str]]:
     with open(path, encoding="utf-8") as handle:
         statements = parse_jcl(handle.readlines())
     remaining, inline_procs = extract_procs(statements)
     proc_defs = {**external_procs, **inline_procs}
-    expanded, warnings = expand_procs(remaining, proc_defs)
-    model = to_model(build_ast(expanded))
-    return model, warnings
+    expanded, proc_warnings = expand_procs(remaining, proc_defs)
+    scenarios, branch_warnings = build_scenarios(expanded)
+
+    models = [
+        (scenario.label, to_model(build_ast(scenario.statements))) for scenario in scenarios
+    ]
+    return models, proc_warnings + branch_warnings
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
@@ -46,9 +53,10 @@ def main() -> int:
     all_usages: List[DsnUsage] = []
 
     for path in args.jcl_files:
-        model, warnings = analyze_file(path, external_procs)
+        scenario_models, warnings = analyze_file(path, external_procs)
         all_warnings.extend(warnings)
-        all_usages.extend(collect_dsn_usages(model))
+        for label, model in scenario_models:
+            all_usages.extend(collect_dsn_usages(model, scenario=label))
 
     graph = build_dsn_graph(all_usages)
     conflicts = check_disp_conflicts(graph)

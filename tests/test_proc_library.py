@@ -93,11 +93,14 @@ class ExternalProcExpansionTest(unittest.TestCase):
                 jcl_path = jcl_file.name
 
         try:
-            model, warnings = analyze_file(jcl_path, external)
+            scenario_models, warnings = analyze_file(jcl_path, external)
         finally:
             os.remove(jcl_path)
 
         self.assertEqual(warnings, [])
+        self.assertEqual(len(scenario_models), 1)
+        label, model = scenario_models[0]
+        self.assertEqual(label, "default")
         self.assertEqual(model.steps[0].name, "CALL1.S1")
         self.assertEqual(model.steps[0].params["PGM"], "EXTERNAL_PGM")
 
