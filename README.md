@@ -119,10 +119,12 @@ JCL の各ステップを GitHub Actions の job に変換します。
 ## 静的解析レイヤー (jcl_analyze.py)
 
 ```bash
-python jcl_analyze.py job1.jcl [job2.jcl ...]
+python jcl_analyze.py job1.jcl [job2.jcl ...] [--proclib DIR ...]
 ```
 
-inline PROC 展開 → DSN依存関係解析 → DISP/ENQ競合検出 を一括実行し、`warnings` / `dsn_usages` / `conflicts` を含む JSON レポートを出力します。複数ファイルを渡すとジョブ横断でのDSN競合(R4)も検出します。
+PROC展開(inline + 外部PROCLIB) → DSN依存関係解析 → DISP/ENQ競合検出 を一括実行し、`warnings` / `dsn_usages` / `conflicts` を含む JSON レポートを出力します。複数ファイルを渡すとジョブ横断でのDSN競合(R4)も検出します。
+
+`--proclib DIR` は繰り返し指定可能で、実際のPROCLIB連結と同様に先に指定したディレクトリが優先されます。ディレクトリ内のファイル名(大文字化)がプロシージャ名になり、`//name PROC ... PEND` を含むメンバーも、PROC/PENDを省略した素のEXEC/DD本体だけのメンバーも読み込めます。同名がJCL内のinline PROCにもある場合は、inline側が優先されます。
 
 **検出ルール:**
 
@@ -132,10 +134,11 @@ inline PROC 展開 → DSN依存関係解析 → DISP/ENQ競合検出 を一括�
 | R2 | ジョブ内で最初の参照がOLD/SHR/MOD(先行NEWなし) | info |
 | R3 | 正常終了ディスポジションDELETE後の再参照 | error |
 | R4 | 複数ジョブが同一DSNに排他DISP(OLD/NEW)を持つ | warning |
+| R5 | DISP=(...,PASS) がジョブ内の後続ステップで一度も参照されない | warning |
 
 **スコープ制限:**
 
-- inline (`PROC`〜`PEND`) の展開のみサポート。外部PROCLIBの解決は非対応(未解決参照は`warnings`に記録)
+- PROC解決は inline (`PROC`〜`PEND`) と `--proclib` で指定したディレクトリのみ対応。どちらにも見つからない参照は`warnings`に記録される
 - ジョブ内のステップは順次実行される前提(COND による分岐・スキップは考慮しない)
 - ジョブ横断のENQ競合(R4)は実行順序が不明なためヒューリスティックな警告であり、確定エラーではない
 
@@ -145,7 +148,7 @@ inline PROC 展開 → DSN依存関係解析 → DISP/ENQ競合検出 を一括�
 
 - `jcl_parser.py`: JCL を JSON AST に変換する本体(継続行マージ・DD連結・インストリームデータを含む)
 - `jcl_models.py`: Pydantic モデル定義 (`--schema` で JSON Schema 出力)
-- `jcl_proc.py`: inline PROC/PEND 展開・シンボリックパラメータ置換
+- `jcl_proc.py`: PROC/PEND 展開(inline + 外部PROCLIB)・シンボリックパラメータ置換
 - `jcl_dsn.py`: DSN依存関係解析
 - `jcl_disp_check.py`: DISP/ENQ競合検出ルール
 - `jcl_analyze.py`: 静的解析レイヤーのCLIエントリポイント
@@ -159,6 +162,6 @@ inline PROC 展開 → DSN依存関係解析 → DISP/ENQ競合検出 を一括�
 
 - DD ライフサイクル対応(`DISP=(NEW,CATLG,DELETE)` → `upload-artifact` / `download-artifact` の自動挿入)
 - JCL 条件制御(COND パラメータ)の解析と GHA の `if:` 条件への変換
-- 外部PROCLIBの解決(ライブラリディレクトリを指定してのPROC参照解決)
-- COND を考慮したステップ実行順序のモデル化(DISP/ENQ検出の精度向上)
+- COND/RC分岐の意味解析(ステップ実行有無をモデル化し、DISP/ENQ検出の精度を上げる)
+- ジョブ横断ENQの確定判定(実行スケジュール情報との連携が必要)
 # jcl-parser

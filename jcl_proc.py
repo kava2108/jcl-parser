@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from jcl_parser import ParamValue
+from jcl_parser import ParamValue, parse_jcl
 
 SYMBOL_RE = re.compile(r"&([A-Za-z0-9$#@]+)\.?")
 
@@ -57,6 +58,42 @@ def extract_procs(
         remaining.append(stmt)
 
     return remaining, proc_defs
+
+
+def load_proc_library(paths: List[str]) -> Dict[str, ProcDef]:
+    """Load cataloged PROCLIB members from a search-ordered list of directories.
+
+    Each file's name is the member/proc name (uppercased, matching JCL naming).
+    A member may contain an explicit `//name PROC ... PEND` block (its defaults
+    and body come from that), or just bare EXEC/DD statements with no PROC
+    statement (PEND is optional in real PROCLIBs; treated here as the whole
+    body with no default symbolics). On a name collision, the first directory
+    in `paths` wins, mirroring PROCLIB concatenation search order.
+    """
+    library: Dict[str, ProcDef] = {}
+
+    for directory in paths:
+        if not os.path.isdir(directory):
+            continue
+        for filename in sorted(os.listdir(directory)):
+            full_path = os.path.join(directory, filename)
+            if not os.path.isfile(full_path):
+                continue
+
+            with open(full_path, encoding="utf-8") as handle:
+                statements = parse_jcl(handle.readlines())
+            remaining, proc_defs = extract_procs(statements)
+
+            if proc_defs:
+                for name, proc_def in proc_defs.items():
+                    if name not in library:
+                        library[name] = proc_def
+            elif remaining:
+                fallback_name = filename.upper()
+                if fallback_name not in library:
+                    library[fallback_name] = ProcDef(name=fallback_name, params={}, statements=remaining)
+
+    return library
 
 
 def _proc_reference(params: Dict[str, ParamValue]) -> Tuple[Optional[str], Dict[str, ParamValue]]:

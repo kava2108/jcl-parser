@@ -66,6 +66,31 @@ class UseAfterDeleteTest(unittest.TestCase):
         self.assertIn("deleted", conflicts[0].reason)
 
 
+class PassNeverReclaimedTest(unittest.TestCase):
+    def test_r5_pass_with_no_later_claim_flagged(self) -> None:
+        lines = [
+            "//JOB1  JOB  CLASS=A\n",
+            "//STEP1 EXEC PGM=P1\n",
+            "//DD1   DD   DSN=TEMP.FILE,DISP=(NEW,PASS)\n",
+        ]
+        conflicts = check_disp_conflicts(build_dsn_graph(_usages(lines)))
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0].severity, "warning")
+        self.assertIn("STEP1", conflicts[0].reason)
+        self.assertIn("PASS", conflicts[0].reason)
+
+    def test_r5_not_flagged_when_later_step_claims_it(self) -> None:
+        lines = [
+            "//JOB1  JOB  CLASS=A\n",
+            "//STEP1 EXEC PGM=P1\n",
+            "//DD1   DD   DSN=TEMP.FILE,DISP=(NEW,PASS)\n",
+            "//STEP2 EXEC PGM=P2\n",
+            "//DD2   DD   DSN=TEMP.FILE,DISP=(OLD,DELETE)\n",
+        ]
+        conflicts = check_disp_conflicts(build_dsn_graph(_usages(lines)))
+        self.assertEqual(conflicts, [])
+
+
 class CrossJobEnqTest(unittest.TestCase):
     def test_r4_two_jobs_hold_exclusive_disp(self) -> None:
         job_a = _usages(

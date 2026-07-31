@@ -26,7 +26,8 @@ def _by_job(usages: List[DsnUsage]) -> Dict[Optional[str], List[DsnUsage]]:
 
 
 def _check_single_job_rules(dsn: str, usages: List[DsnUsage]) -> List[DispConflict]:
-    """R1 (duplicate NEW), R2 (read before create), R3 (use after delete).
+    """R1 (duplicate NEW), R2 (read before create), R3 (use after delete),
+    R5 (PASS never reclaimed).
 
     Assumes `usages` are already in the sequential step order of a single job.
     """
@@ -34,8 +35,9 @@ def _check_single_job_rules(dsn: str, usages: List[DsnUsage]) -> List[DispConfli
     created = False
     deleted = False
     read_before_create_flagged = False
+    last_index = len(usages) - 1
 
-    for usage in usages:
+    for index, usage in enumerate(usages):
         status = (usage.disp_status or "").upper()
         normal = (usage.disp_normal or "").upper()
 
@@ -86,6 +88,23 @@ def _check_single_job_rules(dsn: str, usages: List[DsnUsage]) -> List[DispConfli
             # assumes steps run to normal completion (default COND behavior), so an
             # abnormal-termination DELETE never actually happens on the path being walked.
             deleted = True
+
+        if normal == "PASS" and index == last_index:
+            # PASS only carries a dataset forward to a later step in the same job;
+            # if this is the last usage of the DSN in the job, nothing ever claims
+            # it, so the system deletes it at job end.
+            conflicts.append(
+                DispConflict(
+                    dsn=dsn,
+                    severity="warning",
+                    reason=(
+                        f"{usage.step_name}.{usage.dd_name} passes {dsn} with DISP=(...,PASS) "
+                        "but no later step in this job references it - it will be "
+                        "deleted at job end"
+                    ),
+                    usages=[usage],
+                )
+            )
 
     return conflicts
 
