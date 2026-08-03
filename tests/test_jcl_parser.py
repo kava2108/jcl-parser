@@ -214,7 +214,7 @@ class ToGitHubActionsTest(unittest.TestCase):
             "//DD1   DD   DSN=TEST.FILE,DISP=SHR\n",
         ]
         out = self._convert(lines)
-        self.assertIn("DD_DD1: TEST.FILE", out)
+        self.assertIn("DD_DD1: data/TEST/FILE", out)
         self.assertIn("DISP=SHR", out)
 
     def test_disp_tuple_in_comment(self) -> None:
@@ -253,8 +253,8 @@ class ToGitHubActionsTest(unittest.TestCase):
         self.assertIn("STEP1", jobs)
         self.assertIn("STEP2", jobs)
         self.assertEqual(jobs["STEP2"]["needs"], ["STEP1"])
-        self.assertEqual(jobs["STEP1"]["env"]["DD_DD1"], "FILE1")
-        self.assertEqual(jobs["STEP2"]["env"]["DD_DD2"], "FILE2")
+        self.assertEqual(jobs["STEP1"]["env"]["DD_DD1"], "data/FILE1")
+        self.assertEqual(jobs["STEP2"]["env"]["DD_DD2"], "data/FILE2")
 
     def test_no_job_statement_uses_default_name(self) -> None:
         lines = ["//STEP1 EXEC PGM=MYPROG\n"]

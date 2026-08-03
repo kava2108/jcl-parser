@@ -20,7 +20,7 @@ class DsnUsage:
     conditional: bool = False
 
 
-def _disp_parts(disp: object) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+def disp_parts(disp: object) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     if isinstance(disp, str):
         return disp, None, None
     if isinstance(disp, list):
@@ -53,7 +53,7 @@ def collect_dsn_usages(model: JobAST, scenario: Optional[str] = None) -> List[Ds
             dsn = dd.params.get("DSN")
             if not isinstance(dsn, str) or not dsn:
                 continue
-            status, normal, abnormal = _disp_parts(dd.params.get("DISP"))
+            status, normal, abnormal = disp_parts(dd.params.get("DISP"))
             usages.append(
                 DsnUsage(
                     dsn=_normalize_dsn(dsn),

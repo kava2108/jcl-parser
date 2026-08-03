@@ -113,8 +113,23 @@ JCL の各ステップを GitHub Actions の job に変換します。
 | JOB | `name:` (ワークフロー名) |
 | EXEC PGM= | job の `run:` コマンド |
 | EXEC PARM= | `run:` への引数 |
-| DD DSN= | job の `env:` (DD\_名前=DSN値) |
+| DD DSN= | `jcl_dsn_path.py` でファイルパスに変換し job の `env:` (DD\_名前=パス) に設定 |
+| DD DISP= | `jcl_file_ops.py` で `Prepare datasets` / `Finalize datasets` ステップの mkdir・rm 等に変換 |
 | 複数 EXEC | `needs:` で直列チェーン |
+
+**DSN→パス変換 (`jcl_dsn_path.py`):** `HLQ.MID.LOW` のような修飾子(`.`区切り)を `data/HLQ/MID/LOW` のようなディレクトリ階層に変換します(ベースディレクトリは `to_github_actions(model, base_dir=...)` で変更可)。PDS メンバーや GDG 相対世代 (`HLQ.PDS(MEMBER)` / `HLQ.GDG(+1)`) は括弧内を追加のパス要素として展開します(`data/HLQ/PDS/MEMBER` / `data/HLQ/GDG/+1`)。
+
+**DISP→ファイル操作 (`jcl_file_ops.py`):** DISPの第1サブパラメータ(NEW/OLD/SHR/MOD)と正常終了時ディスポジション(第2サブパラメータ: CATLG/KEEP/DELETE/PASS)から、ステップ実行前後のシェルコマンドを生成します。
+
+| DISP | 生成される操作 |
+|---|---|
+| NEW | 実行前に `mkdir -p` してファイルを作成 |
+| OLD/SHR/MOD | 実行前に `test -e` で存在確認 |
+| 正常終了時 DELETE | 実行後に `rm -f` |
+| 正常終了時 CATLG/KEEP | 実行後の操作なし(パスに永続化) |
+| 正常終了時 PASS | 操作なし(同一ジョブの後続ステップが同じパスを参照するため) |
+
+異常終了時ディスポジション(第3サブパラメータ)は本ツールの「全ステップ正常終了」前提([jcl_analyze.py](jcl_analyze.py) の静的解析レイヤーと同じ前提)のもとでは使われません。
 
 ## 静的解析レイヤー (jcl_analyze.py)
 
@@ -160,7 +175,9 @@ PROC展開(inline + 外部PROCLIB) → IF/THEN/ELSE分岐のシナリオ展開 �
 - `jcl_dsn.py`: DSN依存関係解析(シナリオ・COND条件付きフラグ対応)
 - `jcl_disp_check.py`: DISP/ENQ競合検出ルール
 - `jcl_analyze.py`: 静的解析レイヤーのCLIエントリポイント
-- `jcl_to_gha.py`: AST を GitHub Actions YAML に変換
+- `jcl_dsn_path.py`: DSN→ファイルパス変換
+- `jcl_file_ops.py`: DISP→ファイル操作(mkdir/test -e/rm)への変換
+- `jcl_to_gha.py`: AST を GitHub Actions YAML に変換(DSN→パス・DISP→ファイル操作を含む)
 - `sample.jcl`: 動作確認用のサンプル
 - `tests/`: 回帰テスト一式
 
@@ -168,7 +185,7 @@ PROC展開(inline + 外部PROCLIB) → IF/THEN/ELSE分岐のシナリオ展開 �
 
 ## Future Work
 
-- DD ライフサイクル対応(`DISP=(NEW,CATLG,DELETE)` → `upload-artifact` / `download-artifact` の自動挿入)
+- DD ライフサイクル対応の強化(現状は同一ランナー上のローカルファイル操作のみ。ステップをまたいでファイルを引き継ぐ `upload-artifact` / `download-artifact` の自動挿入)
 - JCL 条件制御(COND パラメータ)の解析と GHA の `if:` 条件への変換
 - 異常終了(ABEND)そのもののモデル化(現状は全ステップ正常終了を前提とした近似)
 - ジョブ横断ENQの確定判定(実行スケジュール情報との連携が必要)

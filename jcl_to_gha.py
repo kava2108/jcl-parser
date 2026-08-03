@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import sys
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
-from jcl_models import DDStatement, ExecStep, JobAST, to_model
+from jcl_file_ops import DDFileOp, plan_step_file_ops
+from jcl_dsn_path import DEFAULT_BASE_DIR
+from jcl_models import ExecStep, JobAST, to_model
 from jcl_parser import build_ast, parse_jcl
 
 
@@ -14,42 +16,57 @@ def _parm_to_args(parm: Any) -> str:
     return str(parm)
 
 
-def _disp_label(disp: Any) -> str:
-    if isinstance(disp, list):
-        return f"({','.join(str(d) for d in disp)})"
-    return str(disp)
+def _disp_label(op: DDFileOp) -> str:
+    parts = [p for p in (op.disp_status, op.disp_normal, op.disp_abnormal) if p]
+    if len(parts) > 1:
+        return f"({','.join(parts)})"
+    return parts[0] if parts else ""
 
 
-def _dd_env_lines(dds: List[DDStatement], indent: str) -> List[str]:
+def _dd_env_lines(ops: List[DDFileOp], indent: str) -> List[str]:
     lines = []
-    for dd in dds:
-        dsn = dd.params.get("DSN") or f"<{dd.name}>"
-        disp = dd.params.get("DISP")
-        comment = f"  # DISP={_disp_label(disp)}" if disp else ""
-        lines.append(f"{indent}    DD_{dd.name}: {dsn}{comment}")
+    for op in ops:
+        disp = _disp_label(op)
+        comment = f"  # DISP={disp}" if disp else ""
+        lines.append(f"{indent}    DD_{op.dd_name}: {op.path}{comment}")
     return lines
 
 
-def _job_block(step: ExecStep, needs: Optional[List[str]]) -> List[str]:
+def _file_op_step(name: str, ops: List[DDFileOp], select: Callable[[DDFileOp], List[str]]) -> List[str]:
+    commands = [cmd for op in ops for cmd in select(op)]
+    if not commands:
+        return []
+    lines = [f"      - name: {name}", "        run: |"]
+    lines.extend(f"          {cmd}" for cmd in commands)
+    return lines
+
+
+def _job_block(step: ExecStep, needs: Optional[List[str]], base_dir: str) -> List[str]:
+    ops = plan_step_file_ops(step, base_dir)
+
     lines: List[str] = []
     lines.append(f"  {step.name}:")
     lines.append(f"    runs-on: ubuntu-latest")
     if needs:
         lines.append(f"    needs: [{', '.join(needs)}]")
-    if step.dds:
+    if ops:
         lines.append(f"    env:")
-        lines.extend(_dd_env_lines(step.dds, indent="  "))
+        lines.extend(_dd_env_lines(ops, indent="  "))
     lines.append(f"    steps:")
     lines.append(f"      - uses: actions/checkout@v4")
+    lines.extend(_file_op_step("Prepare datasets", ops, lambda op: op.pre_ops))
+
     pgm = step.params.get("PGM", "")
     parm = step.params.get("PARM")
     run_cmd = f"{pgm} {_parm_to_args(parm)}" if parm else pgm
     lines.append(f"      - name: Run {pgm}")
     lines.append(f"        run: {run_cmd}")
+
+    lines.extend(_file_op_step("Finalize datasets", ops, lambda op: op.post_ops))
     return lines
 
 
-def to_github_actions(model: JobAST) -> str:
+def to_github_actions(model: JobAST, base_dir: str = DEFAULT_BASE_DIR) -> str:
     job_name = model.name or "JCL_JOB"
     buf = io.StringIO()
 
@@ -64,7 +81,7 @@ def to_github_actions(model: JobAST) -> str:
     for step in model.steps:
         buf.write("\n")
         needs = [prev[-1]] if prev else None
-        for line in _job_block(step, needs):
+        for line in _job_block(step, needs, base_dir):
             buf.write(line + "\n")
         prev.append(step.name)
 
